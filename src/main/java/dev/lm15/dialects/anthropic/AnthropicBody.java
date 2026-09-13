@@ -128,10 +128,9 @@ final class AnthropicBody {
                 }
                 return Json.obj("type", "text", "text", th.text());
             }
-            // The reference's fallback: whatever `text` the part carries, else "".
             case RefusalPart r -> { return Json.obj("type", "text", "text", r.text()); }
-            case CitationPart c -> { return Json.obj("type", "text", "text", c.text() == null ? "" : c.text()); }
-            default -> { return Json.obj("type", "text", "text", ""); }
+            case CitationPart c -> { return Json.obj("type", "text", "text", Common.partsToText(List.of(c))); }
+            default -> throw unsupported(provider, provider + ": " + part.type().wire() + " has no native Anthropic message block (MAP-10)");
         }
     }
 

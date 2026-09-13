@@ -3,13 +3,14 @@
 shim and the Java shim, compared strictly (playbooks/port.md § Reviewing a
 port, step 5: probe outside the corpus).
 
-Usage (from the lm15-contract checkout, both shims registered in
-harness/shims.json):
+Usage (after building the Java package):
 
-    python3 ../lm15-java/tools/differential.py [--report out.json]
+    python3 tools/differential.py --contract ../lm15-contract --python-repo ../lm15-python [--report out.json]
 
-Every difference — and every place where one side refuses and the other
-answers — is a finding. Nothing here touches the network.
+By default every difference is a finding. --verify-documented-fixes additionally
+checks the exact MAP-10 corrections documented in docs/history-content.md against
+the pinned reference; it still records every reference difference and fails any
+unexpected byte or missing correction. Nothing here touches the network.
 """
 
 from __future__ import annotations
@@ -21,9 +22,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-CONTRACT = Path(__file__).resolve().parents[2] / "lm15-contract"
-sys.path.insert(0, str(CONTRACT / "harness"))
-import check  # noqa: E402  (the harness comparator; stdlib only)
+ROOT = Path(__file__).resolve().parents[1]
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
 
@@ -146,15 +145,81 @@ PROVIDERS = {
 }
 
 
+REFERENCE_PIN = "3bbbd3ee1bab40a1a61cc74db120c4a8eb7eb22b"
+
+
+def comparable(reply):
+    if reply.get("ok"):
+        return {"ok": True, "result": reply["result"]}
+    error = reply["error"]
+    return {"ok": False, "error": {"type": error.get("type"), "code": error.get("code")}}
+
+
+def documented_expected(provider, name, reference):
+    """Narrow, exact expectations for known reference defects, never an ignore list."""
+    expected = copy.deepcopy(reference)
+    citation = "Ex — https://example.com"
+    if name == "citation_on_replay":
+        assert expected["ok"], "reference citation behavior changed: re-review the correction"
+        body = expected["result"]["body"]
+        if provider == "openai":
+            row = body["input"][1]
+            assert row == {"role": "assistant", "content": [{"type": "output_text", "text": "Paris"}]}
+            row["content"].append({"type": "output_text", "text": citation})
+        elif provider in ("anthropic", "claude-code"):
+            row = body["messages"][1]
+            assert row == {"role": "assistant", "content": [{"type": "text", "text": "Paris"}, {"type": "text", "text": ""}]}
+            row["content"][1]["text"] = citation
+        elif provider == "gemini":
+            row = body["contents"][1]
+            assert row == {"role": "model", "parts": [{"text": "Paris"}, {"text": ""}]}
+            row["parts"][1]["text"] = citation
+        else:
+            row = body["messages"][1]
+            old_row = {"role": "assistant", "content": "Paris"}
+            if provider == "deepseek":
+                old_row["reasoning_content"] = ""
+            assert row == old_row
+            row["content"] = "Paris\n" + citation
+        return expected, "MAP-10: retain citation title and URL"
+    if name == "media_url_and_file_id" and provider in ("anthropic", "claude-code"):
+        assert expected["ok"]
+        assert expected["result"]["body"]["messages"] == [{"role": "user", "content": [
+            {"type": "text", "text": "see"},
+            {"type": "image", "source": {"type": "url", "url": "https://x/y.jpg"}},
+            {"type": "image", "source": {"type": "file", "file_id": "file_1"}},
+            {"type": "text", "text": ""}, {"type": "text", "text": ""}, {"type": "text", "text": ""}]}]
+        return {"ok": False, "error": {"type": "UnsupportedFeatureError", "code": "unsupported_feature"}}, "MAP-10: refuse media with no Anthropic block"
+    return expected, None
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--python", default="python")
-    ap.add_argument("--java", default="java")
-    ap.add_argument("--report")
+    ap.add_argument("--python", default=sys.executable, help="Python executable")
+    ap.add_argument("--java", default="java", help="Java executable")
+    ap.add_argument("--contract", type=Path, default=ROOT.parent / "lm15-contract")
+    ap.add_argument("--python-repo", type=Path, default=ROOT.parent / "lm15-python")
+    ap.add_argument("--report", type=Path, default=ROOT / "harness-reports/differential.json")
+    ap.add_argument("--verify-documented-fixes", action="store_true")
     args = ap.parse_args(argv)
-    ref = check.load_shim(args.python)
-    port = check.load_shim(args.java)
+    contract = args.contract.resolve()
+    pin = (ROOT / "CONTRACT_PIN").read_text().strip()
+    if subprocess.check_output(["git", "-C", str(contract), "rev-parse", "HEAD"], text=True).strip() != pin:
+        raise SystemExit("Contract revision does not match CONTRACT_PIN")
+    if subprocess.check_output(["git", "-C", str(contract), "status", "--porcelain"], text=True):
+        raise SystemExit("Contract checkout must be clean")
+    reference_revision = subprocess.check_output(["git", "-C", str(args.python_repo), "rev-parse", "HEAD"], text=True).strip()
+    if args.verify_documented_fixes and reference_revision != REFERENCE_PIN:
+        raise SystemExit("Re-review documented corrections before changing the Python reference pin")
+    if subprocess.check_output(["git", "-C", str(args.python_repo), "status", "--porcelain"], text=True):
+        raise SystemExit("Python reference checkout must be clean")
+    sys.path.insert(0, str(contract / "harness"))
+    import check
+    ref = check.Shim("python", [args.python, "-m", "lm15.vet"], args.python_repo.resolve())
+    port = check.Shim("java", [args.java, "-jar", str(ROOT / "target/lm15.jar")], ROOT)
     findings = []
+    reference_differences = []
+    verified_corrections = []
     total = 0
     try:
         for provider, spec in PROVIDERS.items():
@@ -167,25 +232,32 @@ def main(argv=None) -> int:
                     a = ref.call("build_request", **fields)
                     b = port.call("build_request", **fields)
                     case_id = f"{provider}.{name}{'.stream' if stream else ''}"
-                    if a.get("ok") != b.get("ok"):
-                        findings.append({"case": case_id, "note": "one side refused", "python": a, "java": b})
-                        continue
-                    if not a.get("ok"):
-                        ea, eb = a["error"], b["error"]
-                        if (ea.get("type"), ea.get("code")) != (eb.get("type"), eb.get("code")):
-                            findings.append({"case": case_id, "note": "different refusal", "python": ea, "java": eb})
-                        continue
-                    diff = check.first_difference(a["result"], b["result"])
+                    original, actual = comparable(a), comparable(b)
+                    reference_diff = check.first_difference(original, actual)
+                    if reference_diff is not None:
+                        reference_differences.append({"case": case_id, "diff": reference_diff.to_dict()})
+                    expected, rule = documented_expected(provider, name, original) if args.verify_documented_fixes else (original, None)
+                    diff = check.first_difference(expected, actual)
                     if diff is not None:
-                        findings.append({"case": case_id, "note": "different wire", "diff": diff.to_dict()})
+                        findings.append({"case": case_id, "note": "unexpected result", "diff": diff.to_dict()})
+                    elif rule:
+                        verified_corrections.append({"case": case_id, "rule": rule})
     finally:
         ref.close()
         port.close()
-    print(f"{total} comparisons, {len(findings)} findings")
+    if args.verify_documented_fixes:
+        required = {f"{p}.{n}{suffix}" for p in PROVIDERS for n in PROBES for suffix in ("", ".stream")
+                    if n == "citation_on_replay" or (n == "media_url_and_file_id" and p in ("anthropic", "claude-code"))}
+        missing = required - {item["case"] for item in verified_corrections}
+        for case_id in sorted(missing):
+            findings.append({"case": case_id, "note": "documented correction was not verified"})
+    print(f"{total} comparisons, {len(reference_differences)} reference differences, {len(verified_corrections)} verified corrections, {len(findings)} findings")
     for f in findings:
         print(json.dumps(f)[:400])
     if args.report:
-        Path(args.report).write_text(json.dumps({"total": total, "findings": findings}, indent=2))
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps({"total": total, "reference_revision": reference_revision,
+            "reference_differences": reference_differences, "verified_corrections": verified_corrections, "findings": findings}, indent=2))
     return 1 if findings else 0
 
 

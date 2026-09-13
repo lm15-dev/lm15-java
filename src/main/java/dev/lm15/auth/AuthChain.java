@@ -32,10 +32,6 @@ import java.util.function.Function;
 public final class AuthChain {
     private AuthChain() {}
 
-    static {
-        AuthModule.init();
-    }
-
     /**
      * One rung. {@code kind} is the language-neutral fixture vocabulary
      * ({@code api_keys}, {@code env:<VAR>}, {@code placeholder}, {@code oauth-file},
@@ -73,6 +69,7 @@ public final class AuthChain {
 
         /** The credential provider, or the typed not-configured error naming the fix. */
         public CredentialProvider require(AccessPolicy policy) {
+            if (settingError != null) throw new NotConfiguredError(settingError, ErrorMeta.of(policy.provider()));
             if (credential != null) return credential;
             String fix = policy.envKeys().isEmpty() ? "" : " Set " + String.join(" or ", policy.envKeys()) + " in the environment, or pass an explicit api_keys entry.";
             throw new NotConfiguredError("no credential found for provider '" + policy.provider() + "'." + fix, ErrorMeta.of(policy.provider()),
@@ -93,21 +90,30 @@ public final class AuthChain {
      */
     public static Resolved resolve(AccessPolicy policy, Map<String, CredentialProvider> apiKeys, Map<String, String> env, Path credentialsPath,
                                    Map<String, String> files, String home, Map<String, String> settings) {
-        Map<String, String> environment = env != null ? env : System.getenv();
+        ChainContext online = ChainContext.online(env, home != null && !home.isEmpty() ? Path.of(home) : null, dev.lm15.wire.Clock.SYSTEM);
+        ChainContext context = new ChainContext(online.env(), online.home(), files, online.http(), online.run(), online.clock());
+        return resolve(policy, apiKeys, credentialsPath, context, settings);
+    }
+
+    /** The client/doctor share selection; the context controls request-time IO and the clock. */
+    public static Resolved resolve(AccessPolicy policy, Map<String, CredentialProvider> apiKeys, Path credentialsPath,
+                                   ChainContext context, Map<String, String> settings) {
+        Map<String, String> environment = context.env();
         String canonical = Registry.canonicalProvider(policy.provider());
         ProviderDefinition definition = Registry.lookup(canonical);
-        Path homePath = home != null && !home.isEmpty() ? Path.of(home) : null;
+        Path homePath = context.home();
 
-        if (policy.cloudChain() || (definition != null && definition.hosted())) {
-            return resolveCloud(policy, canonical, apiKeys, environment, files, homePath, settings);
+        if (policy.cloudChain() || policy.host() != null) {
+            return resolveCloud(policy, canonical, apiKeys, context, settings);
         }
 
         if (policy.credentialPolicy() == CredentialPolicy.OAUTH) {
-            Step step = oauthStep(canonical, credentialsPath, false);
+            Path path = oauthPath(canonical, credentialsPath, homePath);
+            Step step = oauthStep(canonical, path, false, context.clock());
             boolean configured = step.state().equals("selected");
             CredentialProvider credential = !configured ? null : canonical.equals("claude-code")
-                ? () -> new Credential.BearerToken(ClaudeCodeStore.accessToken(credentialsPath))
-                : () -> new Credential.BearerToken(CodexStore.accessToken(credentialsPath));
+                ? () -> new Credential.BearerToken(ClaudeCodeStore.accessToken(path))
+                : () -> new Credential.BearerToken(CodexStore.accessToken(path));
             return new Resolved(credential, configured ? "oauth-file" : null, List.of(step), configured, Map.of(), null);
         }
 
@@ -127,7 +133,7 @@ public final class AuthChain {
         if (policy.credentialPolicy() == CredentialPolicy.OAUTH_UNLESS_EXPLICIT) {
             // The stored subscription login outranks env keys (AUTH-1): it spends no money per token.
             List<Path> paths = credentialsPath != null ? List.of(credentialsPath) : XaiStore.storePaths(environment, homePath);
-            Step step = xaiOauthStep(paths, source != null);
+            Step step = xaiOauthStep(paths, source != null, context.clock());
             steps.add(step);
             if (step.state().equals("selected")) {
                 credential = () -> new Credential.BearerToken(XaiStore.accessToken(paths, true));
@@ -159,11 +165,12 @@ public final class AuthChain {
         return new Resolved(credential, source, steps, source != null, Map.of(), null);
     }
 
-    private static Resolved resolveCloud(AccessPolicy policy, String canonical, Map<String, CredentialProvider> apiKeys, Map<String, String> environment,
-                                         Map<String, String> files, Path homePath, Map<String, String> settings) {
+    private static Resolved resolveCloud(AccessPolicy policy, String canonical, Map<String, CredentialProvider> apiKeys,
+                                         ChainContext context, Map<String, String> settings) {
+        Map<String, String> environment = context.env();
         String entry = apiKeysSource(apiKeys, canonical);
         boolean hasEntry = entry != null;
-        ChainContext ctx = ChainContext.offline(environment, homePath, files);
+        ChainContext ctx = new ChainContext(environment, context.home(), context.files(), null, null, context.clock());
         Map<String, String> resolved = new LinkedHashMap<>();
         String settingError = null;
         try {
@@ -191,7 +198,7 @@ public final class AuthChain {
             }
             if (credential == null && configured) {
                 // The chain's caching provider walks the SDK order online at request time (AUTH-2/AUTH-3).
-                ChainContext online = ChainContext.online(environment, homePath, ctx.clock()).withSettings(resolved);
+                ChainContext online = new ChainContext(environment, context.home(), context.files(), context.http(), context.run(), context.clock()).withSettings(resolved);
                 credential = Chains.credentialProvider(policy, online);
             }
         } else {
@@ -270,9 +277,15 @@ public final class AuthChain {
 
     // ─── stored logins ───
 
-    static String expiryDetail(LocalOAuthCredential credential) {
+    /** Stored-login defaults respect the caller's home, not an unrelated process home. */
+    public static Path oauthPath(String provider, Path override, Path home) {
+        if (override != null) return override;
+        return provider.equals("claude-code") ? home.resolve(".claude/.credentials.json") : home.resolve(".codex/auth.json");
+    }
+
+    static String expiryDetail(LocalOAuthCredential credential, dev.lm15.wire.Clock clock) {
         if (credential.expiresAt() == null) return "no recorded expiry";
-        long remainingMs = credential.expiresAt() - System.currentTimeMillis();
+        long remainingMs = credential.expiresAt() - clock.now().toEpochMilli();
         if (remainingMs <= 0) return "expired, " + (credential.refreshToken() != null ? "refresh token present" : "NO refresh token");
         long minutes = remainingMs / 60_000;
         long hours = minutes / 60;
@@ -286,18 +299,18 @@ public final class AuthChain {
         return shadowed ? "shadowed" : "selected";
     }
 
-    static Step oauthStep(String provider, Path override, boolean shadowed) {
+    static Step oauthStep(String provider, Path override, boolean shadowed, dev.lm15.wire.Clock clock) {
         boolean claude = provider.equals("claude-code");
         Path path = override != null ? override : (claude ? ClaudeCodeStore.defaultPath() : CodexStore.defaultPath());
         String source = "local OAuth credential " + path;
         LocalOAuthCredential credential = claude ? ClaudeCodeStore.read(path) : CodexStore.read(path);
         if (credential == null) return new Step("oauth-file", "absent", "missing or unreadable", source);
-        String detail = expiryDetail(credential);
+        String detail = expiryDetail(credential, clock);
         return new Step("oauth-file", usableState(credential, detail, shadowed), detail, source);
     }
 
     /** The stored xAI login — the middle rung of oauth-unless-explicit: beaten only by an explicit entry, and itself beating env. */
-    static Step xaiOauthStep(List<Path> paths, boolean shadowed) {
+    static Step xaiOauthStep(List<Path> paths, boolean shadowed, dev.lm15.wire.Clock clock) {
         XaiStore.Loaded loaded;
         try {
             loaded = XaiStore.loadWithSource(paths);
@@ -305,7 +318,7 @@ public final class AuthChain {
             String checked = String.join(" or ", paths.stream().map(Path::toString).toList());
             return new Step("oauth-file", "absent", "missing or unreadable", "local OAuth credential " + checked);
         }
-        String detail = expiryDetail(loaded.credential());
+        String detail = expiryDetail(loaded.credential(), clock);
         return new Step("oauth-file", usableState(loaded.credential(), detail, shadowed), detail, "local OAuth credential " + loaded.path());
     }
 }

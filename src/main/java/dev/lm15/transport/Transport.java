@@ -17,8 +17,8 @@ public interface Transport extends AutoCloseable {
         @Override public void close() {
             try {
                 body.close();
-            } catch (java.io.IOException ignored) {
-                // closing a finished stream
+            } catch (java.io.IOException error) {
+                throw new dev.lm15.errors.TransportError("response stream close failed");
             }
         }
     }

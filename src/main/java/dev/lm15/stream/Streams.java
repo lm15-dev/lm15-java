@@ -16,23 +16,9 @@ public final class Streams {
 
     /** Consume a complete coalesced stream, requiring a final end event (MAP-3); the typed error for an error event. */
     public static Response materialize(Iterator<StreamEvent> events, Request request) {
-        StreamAccumulator acc = new StreamAccumulator(request);
-        Response response = null;
-        try {
-            while (events.hasNext()) {
-                StreamEvent event = events.next();
-                checkTerminal(event, response);
-                acc.push(event);
-                if (event instanceof StreamEndEvent) response = acc.response();
-            }
-        } catch (StreamAssemblyError e) {
-            throw e;
-        } catch (LM15Error e) {
-            if (response == null) throw e;
-            StreamWarnings.warn(e);
+        try (ResponseStream stream = new ResponseStream(events, request)) {
+            return stream.response();
         }
-        if (response == null) throw incomplete(acc);
-        return response;
     }
 
     public static Response materialize(List<StreamEvent> events, Request request) {

@@ -10,13 +10,21 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        java: ['21', '25']
+        include:
+          - os: macos-15
+            java: '21'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: ${{ matrix.java }}
           cache: maven
       - uses: actions/setup-python@v5
         with:
@@ -36,10 +44,29 @@ jobs:
           fi
       - name: Build and unit tests
         run: mvn -B -q package
-      - name: Contract harness (pinned)
+      - name: Use the packaged JAR outside the checkout
+        shell: bash
         run: |
-          test -z "$(git -C ../lm15-contract status --porcelain --untracked-files=all)"
-          python3 ../lm15-contract/harness/check.py --shim java --direction all
+          smoke_dir=$(mktemp -d)
+          cp target/lm15.jar examples/Offline.java "$smoke_dir/"
+          cd "$smoke_dir"
+          javac -cp lm15.jar Offline.java
+          java -cp "lm15.jar:." Offline
+      - name: Contract harness (pinned)
+        run: python3 tools/check_contract.py --contract ../lm15-contract --direction all
+      - name: Compare independent requests with pinned reference
+        shell: bash
+        run: |
+          git clone --no-checkout https://github.com/lm15-dev/lm15-python.git ../lm15-python
+          git -C ../lm15-python checkout --detach 3bbbd3ee1bab40a1a61cc74db120c4a8eb7eb22b
+          python3 tools/differential.py --contract ../lm15-contract --python-repo ../lm15-python --verify-documented-fixes
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: java-validation-${{ matrix.os }}-${{ matrix.java }}
+          path: |
+            target/surefire-reports/
+            harness-reports/
       - name: Contract checkout stays clean
         if: always()
         run: |

@@ -254,7 +254,12 @@ public class OpenAIChatDialect implements Dialect {
                 List<JsonValue> toolCalls = new ArrayList<>();
                 List<String> thinkingBits = new ArrayList<>();
                 for (Part part : msg.parts()) {
+                    if (part instanceof MediaPart) {
+                        throw new UnsupportedFeatureError(cx.provider() + ": " + part.type().wire()
+                            + " has no native block in an assistant Chat Completions message", ErrorMeta.of(cx.provider()));
+                    }
                     if (part instanceof TextPart t) textBits.add(t.text());
+                    else if (part instanceof CitationPart c) textBits.add(Common.partsToText(List.of(c)));
                     else if (part instanceof RefusalPart r && !r.text().isEmpty()) textBits.add(r.text());
                     else if (part instanceof ThinkingPart th && compat.thinkingReplay().equals("as_text") && !th.text().isEmpty()) textBits.add(th.text());
                     if (part instanceof ThinkingPart th && !th.text().isEmpty()) thinkingBits.add(th.text());

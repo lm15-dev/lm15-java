@@ -157,9 +157,23 @@ final class ResponsesRequest {
 
             List<JsonObject> content = new ArrayList<>();
             if (msg.role() == Role.ASSISTANT) {
+                boolean nativeInput = msg.parts().stream().anyMatch(p -> p instanceof MediaPart);
+                if (nativeInput) {
+                    for (Part part : msg.parts()) {
+                        if (part instanceof AudioPart || part instanceof VideoPart || part instanceof RefusalPart) {
+                            throw new UnsupportedFeatureError(provider + ": " + part.type().wire()
+                                + " cannot share an assistant Responses input message with media", ErrorMeta.of(provider));
+                        }
+                    }
+                }
+                String textType = nativeInput ? "input_text" : "output_text";
                 for (Part part : msg.parts()) {
                     if (part instanceof TextPart t) {
-                        content.add(Json.obj("type", "output_text", "text", t.text()));
+                        content.add(Json.obj("type", textType, "text", t.text()));
+                    } else if (part instanceof CitationPart c) {
+                        content.add(Json.obj("type", textType, "text", Common.partsToText(List.of(c))));
+                    } else if (part instanceof MediaPart) {
+                        content.add(Common.partToOpenAIInput(part, provider));
                     } else if (part instanceof RefusalPart r) {
                         content.add(Json.obj("type", "refusal", "refusal", r.text()));
                     } else if (part instanceof ThinkingPart th) {
@@ -177,7 +191,7 @@ final class ResponsesRequest {
                             items.add(item.build());
                         } else if (!th.text().isEmpty()) {
                             // No native state: replay as assistant text (decision G) rather than drop it.
-                            content.add(Json.obj("type", "output_text", "text", th.text()));
+                            content.add(Json.obj("type", textType, "text", th.text()));
                         }
                     }
                 }

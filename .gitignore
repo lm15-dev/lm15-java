@@ -4,3 +4,8 @@ target/
 *.iml
 .vscode/
 harness-reports/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example

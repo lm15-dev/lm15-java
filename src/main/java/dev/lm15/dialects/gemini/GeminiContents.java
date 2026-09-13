@@ -103,7 +103,7 @@ final class GeminiContents {
                 return out.build();
             }
             case RefusalPart r -> { return Json.obj("text", r.text() == null ? "" : r.text()); }
-            case CitationPart c -> { return Json.obj("text", c.text() == null ? "" : c.text()); }
+            case CitationPart c -> { return Json.obj("text", Common.partsToText(List.of(c))); }
         }
     }
 

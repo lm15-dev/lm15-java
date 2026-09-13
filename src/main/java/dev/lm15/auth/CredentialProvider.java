@@ -9,10 +9,14 @@ package dev.lm15.auth;
 public interface CredentialProvider {
     Credential get();
 
-    static CredentialProvider of(Credential credential) { return () -> credential; }
-
-    static CredentialProvider of(String apiKey) {
-        Credential c = new Credential.ApiKey(apiKey);
-        return () -> c;
+    /** A known value can be validated without invoking a dynamic credential source. */
+    record Fixed(Credential value) implements CredentialProvider {
+        public Fixed { java.util.Objects.requireNonNull(value, "credential"); }
+        @Override public Credential get() { return value; }
+        @Override public String toString() { return "CredentialProvider([REDACTED])"; }
     }
+
+    static CredentialProvider of(Credential credential) { return new Fixed(credential); }
+
+    static CredentialProvider of(String apiKey) { return of(new Credential.ApiKey(apiKey)); }
 }

@@ -5,8 +5,9 @@ import dev.lm15.auth.AccessPolicy;
 import dev.lm15.auth.Credential;
 import dev.lm15.auth.CredentialPolicy;
 import dev.lm15.auth.CredentialProvider;
-import dev.lm15.auth.CredentialStores;
-import dev.lm15.auth.LoadedCredential;
+import dev.lm15.auth.AuthChain;
+import dev.lm15.auth.CodexStore;
+import dev.lm15.cloud.ChainContext;
 import dev.lm15.cloud.Hosts;
 import dev.lm15.compat.Compat;
 import dev.lm15.dialects.Dialect;
@@ -15,6 +16,7 @@ import dev.lm15.errors.AuthError;
 import dev.lm15.errors.ErrorMeta;
 import dev.lm15.errors.Errors;
 import dev.lm15.errors.LM15Error;
+import dev.lm15.errors.NotConfiguredError;
 import dev.lm15.errors.TransportError;
 import dev.lm15.errors.UnsupportedFeatureError;
 import dev.lm15.jobs.BatchJob;
@@ -120,7 +122,9 @@ public final class ProviderLM implements AutoCloseable {
     // ─── the emit path ───
 
     private Credential credential() {
-        return credentials == null ? null : credentials.get();
+        Credential value = credentials == null ? null : credentials.get();
+        if (value == null) throw new NotConfiguredError(provider() + ": credential source returned no credential; no fallback", ErrorMeta.of(provider()));
+        return value;
     }
 
     /** Finish a dialect-built request through the bound host and sign it (the reference's {@code _emit}). */
@@ -190,6 +194,9 @@ public final class ProviderLM implements AutoCloseable {
 
     public Response complete(Request request) {
         require("complete");
+        if ("chatgpt-codex".equals(policy.backend())) {
+            try (ResponseStream response = responseStream(request)) { return response.response(); }
+        }
         return parseResponse(request, sendOk(buildRequest(request, false)));
     }
 
@@ -199,15 +206,16 @@ public final class ProviderLM implements AutoCloseable {
         TransportRequest req = buildRequest(request, true);
         Transport.Streaming open = transport.stream(req);
         if (open.status() >= 400) {
-            byte[] body;
             try (open) {
-                body = open.body().readAllBytes();
+                byte[] body = open.body().readNBytes(1024 * 1024);
+                LM15Error error = normalizeError(open.status(), new String(body, java.nio.charset.StandardCharsets.UTF_8));
+                Errors.attachMetadata(error, open.headers());
+                throw error;
+            } catch (java.net.SocketTimeoutException e) {
+                throw new dev.lm15.errors.TimeoutError("response body read timed out");
             } catch (java.io.IOException e) {
-                throw new TransportError(e.getMessage());
+                throw new TransportError("response body read failed");
             }
-            LM15Error error = normalizeError(open.status(), new String(body, java.nio.charset.StandardCharsets.UTF_8));
-            Errors.attachMetadata(error, open.headers());
-            throw error;
         }
         return new EventStream(request, context(request), open);
     }
@@ -227,6 +235,8 @@ public final class ProviderLM implements AutoCloseable {
         private final Coalescer coalescer;
         private final java.util.ArrayDeque<StreamEvent> pending = new java.util.ArrayDeque<>();
         private boolean exhausted;
+        private boolean closed;
+        private RuntimeException failure;
 
         EventStream(Request request, BuildContext cx, Transport.Streaming open) {
             this.request = request;
@@ -237,14 +247,27 @@ public final class ProviderLM implements AutoCloseable {
         }
 
         private void fill() {
-            while (pending.isEmpty() && !exhausted) {
-                if (frames.hasNext()) {
-                    for (StreamEvent e : dialect.parseStreamEvent(request, cx, frames.next())) pending.addAll(coalescer.push(e));
-                } else {
-                    exhausted = true;
-                    pending.addAll(coalescer.finish());
-                    close();
+            if (failure != null) throw failure;
+            if (closed) return;
+            try {
+                while (pending.isEmpty() && !exhausted) {
+                    if (frames.hasNext()) {
+                        for (StreamEvent e : dialect.parseStreamEvent(request, cx, frames.next())) pending.addAll(coalescer.push(e));
+                    } else {
+                        exhausted = true;
+                        pending.addAll(coalescer.finish());
+                    }
                 }
+                // Deliver the coalesced end before cleanup. A close failure after
+                // that boundary is a warning, not a lost completed response (MAP-3).
+                if (exhausted && pending.isEmpty()) close();
+            } catch (RuntimeException error) {
+                failure = error;
+                try { close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
+                throw error;
+            } catch (Error error) {
+                try { close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
+                throw error;
             }
         }
 
@@ -256,7 +279,13 @@ public final class ProviderLM implements AutoCloseable {
             return pending.poll();
         }
 
-        @Override public void close() { open.close(); }
+        @Override public void close() {
+            if (closed) return;
+            closed = true;
+            exhausted = true;
+            pending.clear();
+            open.close();
+        }
     }
 
     // ─── surfaces ───
@@ -485,7 +514,7 @@ public final class ProviderLM implements AutoCloseable {
         public Builder baseUrl(String url) { this.baseUrl = url; return this; }
         public Builder settings(Map<String, String> s) { this.settings = s == null ? Map.of() : s; return this; }
         public Builder setting(String name, String value) { var m = new java.util.LinkedHashMap<>(settings); m.put(name, value); settings = m; return this; }
-        /** The environment for host-setting fallbacks (the router passes its env; a bare adapter reads none). */
+        /** Complete environment for credentials and host settings; defaults to the process environment. */
         public Builder env(Map<String, String> env) { this.env = env; return this; }
         public Builder compat(Compat c) { this.compat = c; return this; }
         public Builder preset(String name) { this.compatPreset = name; return this; }
@@ -494,16 +523,58 @@ public final class ProviderLM implements AutoCloseable {
         public Builder clock(Clock c) { this.clock = c; return this; }
         public Builder transport(Transport t) { this.transport = t; return this; }
 
+        private Builder(Builder source) {
+            definition = source.definition;
+            policy = source.policy;
+            compat = source.compat;
+            compatPreset = source.compatPreset;
+            baseUrl = source.baseUrl;
+            settings = source.settings;
+            env = source.env;
+            credentials = source.credentials;
+            credentialsPath = source.credentialsPath;
+            accountId = source.accountId;
+            clock = source.clock;
+            transport = source.transport;
+        }
+
         public ProviderLM build() {
+            Builder bound = new Builder(this);
+            boolean ownsTransport = bound.transport == null;
+            if (ownsTransport) bound.transport = new HttpTransport();
+            try {
+                return bound.buildBound();
+            } catch (RuntimeException | Error error) {
+                if (ownsTransport) {
+                    try { bound.transport.close(); } catch (RuntimeException cleanup) { error.addSuppressed(cleanup); }
+                }
+                throw error;
+            }
+        }
+
+        private ProviderLM buildBound() {
             dialect = Dialects.lookup(definition.dialectImpl());
             if (compat == null) {
                 String preset = compatPreset != null ? compatPreset : definition.compat();
                 compat = preset != null ? dialect.compat(preset) : dialect.defaultCompat(policy.provider());
             }
+            ChainContext authContext = ChainContext.online(env, null, clock, transport);
+            // Direct subscription adapters allow a supplied credential (the shim uses this
+            // path too). Router subscription policies remain local-store-only (AUTH-1).
+            if (credentials == null || policy.credentialPolicy() != CredentialPolicy.OAUTH) {
+                Map<String, CredentialProvider> explicit = credentials == null ? Map.of() : Map.of(policy.provider(), credentials);
+                AuthChain.Resolved resolved = AuthChain.resolve(policy, explicit, credentialsPath, authContext, settings);
+                credentials = resolved.require(policy);
+                credentialSource = "oauth-file".equals(resolved.source()) ? "stored" : resolved.source();
+                if (policy.host() != null) settings = resolved.settings();
+                if (accountId == null && "stored".equals(credentialSource) && policy.provider().equals("openai-codex")) {
+                    var stored = CodexStore.read(AuthChain.oauthPath(policy.provider(), credentialsPath, authContext.home()));
+                    if (stored != null) accountId = stored.accountId();
+                }
+            }
             // A named preset's server address, never the cloud's (api-family 2026-09-11).
             if (baseUrl == null) {
                 if (policy.host() != null) {
-                    settings = Hosts.resolveSettings(policy.host(), settings, env, policy.provider(), null);
                     baseUrl = Hosts.renderBaseUrl(policy.host(), settings);
                 } else if (policy.baseUrl() != null) {
                     baseUrl = policy.baseUrl();
@@ -512,16 +583,9 @@ public final class ProviderLM implements AutoCloseable {
                 } else {
                     baseUrl = dev.lm15.compat.PresetAddresses.dialectDefault(dialect.id());
                 }
-            } else if (policy.host() != null) {
-                settings = Hosts.resolveSettings(policy.host(), settings, env, policy.provider(), null);
             }
-            LoadedCredential loaded = CredentialStores.load(policy, credentials, credentialsPath);
-            credentials = loaded.credential();
-            credentialSource = loaded.source();
-            if (accountId == null) accountId = loaded.accountId();
-            if (transport == null) transport = new HttpTransport();
-            // A static credential of the wrong kind for this door fails now, not on the first request.
-            if ("explicit".equals(credentialSource)) Access.selectScheme(policy, credentials.get());
+            // Check known values now without ever executing a callback at construction.
+            if (credentials instanceof CredentialProvider.Fixed fixed) Access.selectScheme(policy, fixed.value());
             return new ProviderLM(this);
         }
     }

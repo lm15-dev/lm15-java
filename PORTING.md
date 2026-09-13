@@ -12,7 +12,7 @@ family member (`playbooks/api-family.md`).
 | `dev.lm15.types` | Canonical types as records; sealed `Part` / `Delta` / `StreamEvent` / `LiveClientEvent` / `LiveServerEvent`; vocabularies as enums with `wire()` / `fromWire()`; `ValidationException` (ValueError / TypeError). Absent = `null`. Lists are immutable copies. |
 | `dev.lm15.serde.Canonical` | `toJson(x)` / `xFromJson(JsonObject)` per type + `Canonical.kind(name)` for the vet. Read helpers `readString/readInt/readDouble/readBool/readObject/readArray/readStrings` implement the Number rule at the boundary. |
 | `dev.lm15.errors` | `LM15Error` tree with the family's class names; `ErrorMeta(provider, providerCode, status, requestId, retryAfter)`; `Errors.mapHttpError`, `Errors.attachMetadata`. |
-| `dev.lm15.auth` | `Credential` sum (ApiKey/BearerToken/AwsCredentials), `CredentialProvider`, `AccessPolicy` + the `Access` table (AUTH-10), `Access.selectScheme` / `authHeader`, `CredentialStores` (stored-login loaders register here), `Rfc3339`. |
+| `dev.lm15.auth` | `Credential` sum (ApiKey/BearerToken/AwsCredentials), `CredentialProvider`, `AccessPolicy` + the `Access` table (AUTH-10), `Access.selectScheme` / `authHeader`, `AuthChain` (shared client/doctor selection), `CredentialStores` (low-level stored-login helpers), `Rfc3339`. |
 | `dev.lm15.wire` | `WireRequest` (what a dialect builds: path under the base URL, params, headers, JSON or raw body, `endpoint`, `model`), `TransportRequest` (what goes on the wire), `BuildContext` (provider, policy, settings, compat, baseUrl, wire model, accountId), `Wire.emit` (auth header + host rewrites + SigV4), `Wire.pathId` (MAP-11), `Wire.normalize` (the vet's request shape), `Clock`. |
 | `dev.lm15.cloud` | `Hosts` (settings resolution, base-URL rendering, host rewrites), `SigV4` (seam; the signer lands with the cloud module). |
 | `dev.lm15.compat` | `Compat` marker interface; each dialect defines its own compat record + preset table; `PresetAddresses` (a preset name supplies its server's address). |
@@ -45,10 +45,9 @@ family member (`playbooks/api-family.md`).
 ## Running the harness
 
 ```bash
-mvn -q -B -DskipTests package            # target/lm15.jar (the shim)
-cd ../lm15-contract
-python3 harness/check.py --shim java --direction request    # or response, stream, error, serde, auth, token, models, live, files, batch, generation, video, cache, router, ingest, all
-python3 harness/check.py --shim java --direction request --case anthropic.basic_text
+mvn -B package                         # tests + target/lm15.jar
+python3 tools/check_contract.py --contract ../lm15-contract --direction all
+python3 tools/check_contract.py --contract ../lm15-contract --direction request --case anthropic.basic_text
 ```
 
-Reports land in `lm15-contract/harness/reports/<direction>.json`; failed cases carry the first JSON diff path. The corpus is read-only to the port (port.md rule 1).
+Reports land in `harness-reports/<direction>.json`; failed cases carry the first JSON diff path. The wrapper supplies a temporary Java registration without editing the corpus (port.md rule 1). See `CONFORMANCE.md` for the independent comparison gate and runtime boundaries.

@@ -2,6 +2,8 @@ package dev.lm15.router;
 
 import dev.lm15.ProviderLM;
 import dev.lm15.auth.Access;
+import dev.lm15.auth.AuthChain;
+import dev.lm15.auth.CredentialPolicy;
 import dev.lm15.auth.CredentialProvider;
 import dev.lm15.compat.PresetAddresses;
 import dev.lm15.dialects.Dialect;
@@ -253,7 +255,7 @@ public final class LMRouter {
 
     /** WHICH env var {@link #lm} would read for this provider (never the value); null when explicit keys override or none is declared. */
     private String envKeyFor(ProviderDefinition definition) {
-        if (CredentialResolution.apiKeysSource(config.apiKeys(), definition.id()) != null) return null;
+        if (AuthChain.apiKeysSource(config.apiKeys(), definition.id()) != null) return null;
         List<String> envKeys = definition.envKeys();
         if (envKeys.isEmpty()) return null;
         for (String key : envKeys) if (config.envValue(key) != null) return key;
@@ -291,9 +293,12 @@ public final class LMRouter {
             }
             builder.baseUrl(baseUrl);
         }
-        CredentialResolution.Resolved resolved = CredentialResolution.resolve(
-            definition.access(), config.apiKeys(), config.environment(), config.credentialsPath());
-        if (resolved.credential() != null) builder.credentials(resolved.credential());
+        if (definition.access().credentialPolicy() != CredentialPolicy.OAUTH) {
+            String explicit = AuthChain.apiKeysSource(config.apiKeys(), provider);
+            if (explicit != null) builder.credentials(config.apiKeys().get(explicit));
+        }
+        // The ordinary adapter performs the same AuthChain selection as the doctor.
+        // Do not turn an environment/stored/cloud source into an explicit override.
         return builder.build();
     }
 

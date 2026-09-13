@@ -72,6 +72,24 @@ public final class ChainContext {
         return new ChainContext(values, home, null, ChainContext::defaultHttp, (argv, timeout) -> defaultRun(argv, timeout, values), clock);
     }
 
+    /** Credential exchanges use the same injectable transport as inference, without doing IO here. */
+    public static ChainContext online(Map<String, String> env, Path home, Clock clock, dev.lm15.transport.Transport transport) {
+        ChainContext defaults = online(env, home, clock);
+        HttpFn http = (method, url, headers, body, timeoutSeconds) -> {
+            try {
+                var request = new dev.lm15.wire.TransportRequest(method, url, List.of(), new ArrayList<>(headers.entrySet()),
+                    null, body, Duration.ofMillis((long) Math.max(1, timeoutSeconds * 1000)));
+                var response = transport.send(request);
+                Map<String, String> responseHeaders = new LinkedHashMap<>();
+                for (var header : response.headers()) responseHeaders.put(header.getKey().toLowerCase(java.util.Locale.ROOT), header.getValue());
+                return new HttpResult(response.status(), responseHeaders, response.body());
+            } catch (RuntimeException e) {
+                throw new AuthError("credential HTTP request failed");
+            }
+        };
+        return new ChainContext(defaults.env(), defaults.home(), null, http, defaults.run(), defaults.clock());
+    }
+
     public Map<String, String> env() { return env; }
     public Path home() { return home; }
     public Map<String, String> files() { return files; }
@@ -167,25 +185,66 @@ public final class ChainContext {
     }
 
     static String defaultRun(List<String> argv, double timeoutSeconds, Map<String, String> env) {
+        if (argv.isEmpty() || !Double.isFinite(timeoutSeconds) || timeoutSeconds <= 0) throw new AuthError("invalid credential command");
+        Process process = null;
+        var readers = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
         try {
-            ProcessBuilder pb = new ProcessBuilder(new ArrayList<>(argv));
+            List<String> command = new ArrayList<>(argv);
+            String executable = command.get(0);
+            if (!executable.contains("/") && !executable.contains("\\")) {
+                executable = ChainContext.offline(env, null, null).onPath(executable);
+                if (executable == null) throw new AuthError("credential command not found in configured PATH");
+                command.set(0, executable);
+            }
+            ProcessBuilder pb = new ProcessBuilder(command);
             pb.environment().clear();
             pb.environment().putAll(env);
-            pb.redirectErrorStream(false);
-            Process p = pb.start();
-            p.getOutputStream().close();
-            byte[] out = p.getInputStream().readAllBytes();
-            if (!p.waitFor((long) Math.max(1, timeoutSeconds * 1000), TimeUnit.MILLISECONDS)) {
-                p.destroyForcibly();
-                throw new AuthError("credential command failed");
-            }
-            if (p.exitValue() != 0) throw new AuthError("credential command exited " + p.exitValue());
+            process = pb.start();
+            Process running = process;
+            process.getOutputStream().close();
+            long budget = (long) Math.min(Long.MAX_VALUE / 2.0, timeoutSeconds * 1_000_000_000);
+            long deadline = System.nanoTime() + budget;
+            var stdout = readers.submit(() -> commandOutput(running.getInputStream(), running));
+            var stderr = readers.submit(() -> commandOutput(running.getErrorStream(), running));
+            if (!process.waitFor(budget, TimeUnit.NANOSECONDS)) throw new AuthError("credential command timed out");
+            byte[] out = stdout.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            stderr.get(Math.max(1, deadline - System.nanoTime()), TimeUnit.NANOSECONDS);
+            if (process.exitValue() != 0) throw new AuthError("credential command exited " + process.exitValue());
             return new String(out, StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new AuthError("credential command failed");
+        } catch (java.util.concurrent.TimeoutException e) {
+            throw new AuthError("credential command timed out");
+        } catch (IOException | java.util.concurrent.ExecutionException e) {
+            throw new AuthError("credential command failed or exceeded its output limit");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            throw new AuthError("credential command failed");
+            throw new AuthError("credential command interrupted");
+        } finally {
+            if (process != null) {
+                terminate(process);
+                Process ended = process;
+                // A helper can leave a descendant holding a pipe. Closing that pipe
+                // must not hold the calling thread beyond its deadline.
+                Thread.startVirtualThread(() -> {
+                    for (var stream : List.of(ended.getInputStream(), ended.getErrorStream())) {
+                        try { stream.close(); } catch (IOException ignored) { }
+                    }
+                });
+            }
+            readers.shutdownNow();
         }
+    }
+
+    private static byte[] commandOutput(java.io.InputStream stream, Process process) throws IOException {
+        byte[] bytes = stream.readNBytes(1024 * 1024 + 1);
+        if (bytes.length > 1024 * 1024) {
+            terminate(process);
+            throw new IOException("credential command output exceeds limit");
+        }
+        return bytes;
+    }
+
+    private static void terminate(Process process) {
+        process.descendants().forEach(child -> { if (child.isAlive()) child.destroyForcibly(); });
+        if (process.isAlive()) process.destroyForcibly();
     }
 }

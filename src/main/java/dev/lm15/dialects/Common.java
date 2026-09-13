@@ -145,8 +145,9 @@ public final class Common {
         switch (part) {
             case TextPart t -> { return Json.obj("type", "input_text", "text", t.text()); }
             case ImagePart img -> {
-                if (img.fileId() != null) return Json.obj("type", "input_image", "file_id", img.fileId());
-                JsonBuilder b = new JsonBuilder().put("type", "input_image").put("image_url", img.url() != null ? img.url() : mediaDataUri(img));
+                JsonBuilder b = new JsonBuilder().put("type", "input_image");
+                if (img.fileId() != null) b.put("file_id", img.fileId());
+                else b.put("image_url", img.url() != null ? img.url() : mediaDataUri(img));
                 if (img.detail() != null) b.put("detail", img.detail().wire());
                 return b.build();
             }

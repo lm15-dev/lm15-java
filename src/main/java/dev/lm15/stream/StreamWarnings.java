@@ -12,9 +12,18 @@ public final class StreamWarnings {
 
     private static volatile Consumer<Throwable> handler = e ->
         System.getLogger("dev.lm15").log(System.Logger.Level.WARNING,
-            "stream source failed after the response was complete (" + e.getClass().getSimpleName() + ": " + e.getMessage() + "); the Response is returned unchanged");
+            "stream cleanup failed (" + e.getClass().getSimpleName() + "); see ResponseStream.cleanupErrors()");
 
     public static void setHandler(Consumer<Throwable> h) { handler = h == null ? e -> {} : h; }
 
-    public static void warn(Throwable e) { handler.accept(e); }
+    public static void warn(Throwable e) {
+        try {
+            handler.accept(e);
+        } catch (RuntimeException warningFailure) {
+            // User-provided logging must not replace a completed answer.
+            try {
+                System.getLogger("dev.lm15").log(System.Logger.Level.WARNING, "stream cleanup warning handler failed");
+            } catch (RuntimeException ignored) { /* The original failure remains in cleanupErrors. */ }
+        }
+    }
 }

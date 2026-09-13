@@ -23,13 +23,14 @@ public final class ResponseStream implements Iterable<String>, AutoCloseable {
     private RuntimeException failure;
     private boolean done;
     private boolean sourceClosed;
+    private Iterator<StreamEvent> eventView;
     private final List<Throwable> cleanupErrors = new ArrayList<>();
 
     public ResponseStream(Iterator<StreamEvent> events, Request request) { this(events, request, null); }
 
     public ResponseStream(Iterator<StreamEvent> events, Request request, AutoCloseable closer) {
         this.source = events;
-        this.closer = closer;
+        this.closer = closer != null ? closer : events instanceof AutoCloseable closeable ? closeable : null;
         this.accumulator = new StreamAccumulator(request);
     }
 
@@ -38,30 +39,29 @@ public final class ResponseStream implements Iterable<String>, AutoCloseable {
 
     /** Canonical stream events, teed through the accumulator. */
     public Iterator<StreamEvent> events() {
-        return new Iterator<>() {
+        if (eventView != null) return eventView;
+        eventView = new Iterator<>() {
             private StreamEvent next;
 
             private void advance() {
-                if (next != null || done) return;
+                if (failure != null) throw failure;
+                if (done) { next = null; return; }
+                if (next != null) return;
                 try {
                     if (source.hasNext()) {
-                        StreamEvent event = source.next();
-                        Streams.checkTerminal(event, response);
-                        accumulator.push(event);
-                        if (event instanceof StreamEndEvent) response = accumulator.response();
-                        next = event;
+                        next = source.next();
                         return;
                     }
                 } catch (StreamAssemblyError e) {
-                    fail(e);
+                    throw fail(e);
                 } catch (LM15Error e) {
-                    if (response == null) fail(e);
+                    if (response == null) throw fail(e);
                     else { cleanupErrors.add(e); StreamWarnings.warn(e); }
                 } catch (RuntimeException e) {
-                    if (response == null) fail(e);
+                    if (response == null) throw fail(e);
                     else { cleanupErrors.add(e); StreamWarnings.warn(e); }
                 }
-                if (response == null && failure == null) fail(Streams.incomplete(accumulator));
+                if (response == null && failure == null) throw fail(Streams.incomplete(accumulator));
                 finish();
             }
 
@@ -72,15 +72,23 @@ public final class ResponseStream implements Iterable<String>, AutoCloseable {
                 if (next == null) throw new NoSuchElementException();
                 StreamEvent e = next;
                 next = null;
-                return e;
+                try {
+                    Streams.checkTerminal(e, response);
+                    accumulator.push(e);
+                    if (e instanceof StreamEndEvent) response = accumulator.response();
+                    return e;
+                } catch (RuntimeException error) {
+                    throw fail(error);
+                }
             }
         };
+        return eventView;
     }
 
-    private void fail(RuntimeException e) {
+    private RuntimeException fail(RuntimeException e) {
         if (failure == null) failure = e;
         finish();
-        throw e;
+        return failure;
     }
 
     private void finish() {
@@ -95,8 +103,10 @@ public final class ResponseStream implements Iterable<String>, AutoCloseable {
         try {
             closer.close();
         } catch (Exception e) {
-            if (response != null) { cleanupErrors.add(e); StreamWarnings.warn(e); }
-            else if (failure == null) failure = e instanceof RuntimeException r ? r : new RuntimeException(e);
+            cleanupErrors.add(e);
+            if (failure != null && failure != e) failure.addSuppressed(e);
+            if (response == null && failure == null) failure = e instanceof RuntimeException r ? r : new RuntimeException(e);
+            StreamWarnings.warn(e);
         }
     }
 

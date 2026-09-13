@@ -31,13 +31,15 @@ the same skip the reference reports.
 | `live` | the websocket codec (OpenAI Realtime, Gemini Live) | 24 / 0 |
 | `ingest` | MAP-12: a Chat Completions request body → `Request` under one preset's spellings; the response door | 160 / 0 |
 
-Beyond the harness: 132 unit and integration tests (`mvn test`), and
-`tools/differential.py` — 368 hand-built build_request comparisons against
-the reference shim outside the corpus (23 probes × 8 providers × complete /
-stream: media in tool results, citation and thinking replay, every config
-knob, cache intents, forced and builtin tool choice, continuation states),
-zero differences. Each module's port also ran its own out-of-corpus probe
-against the reference (78–91 ops each) before landing.
+Beyond the harness: **163 unit and integration tests** (`mvn test`) and
+368 independent request comparisons (23 probes × 8 providers × complete /
+stream). Of these, 348 match Python; 20 verify documented corrections to its
+lost citations and unsupported media. Nothing is skipped: the corrected
+results are checked explicitly against MAP-10, and every reference difference
+is recorded. See [CONFORMANCE.md](CONFORMANCE.md) and
+[history content](docs/history-content.md) for evidence and reproduction.
+CI also tests the standalone JAR outside the source checkout, on Linux
+(Java 21/25) and macOS (Java 21).
 
 ### Not exercised live, stated
 
@@ -51,9 +53,10 @@ next step.
 ## Gates
 
 ```bash
-mvn -B package                        # unit tests + target/lm15.jar (the vet shim)
-cd ../lm15-contract
-python3 harness/check.py --shim java --direction all
+mvn -B package                        # unit tests + target/lm15.jar
+python3 tools/check_contract.py --contract ../lm15-contract --direction all
+python3 tools/differential.py --contract ../lm15-contract \
+  --python-repo ../lm15-python --verify-documented-fixes
 ```
 
 The contract is never copied into this repository: the serde test
@@ -88,7 +91,10 @@ try (ResponseStream rs = router.responseStream(request)) {
 System.out.println(router.resolve("grok-4"));
 ```
 
-A provider directly, with a key:
+Direct providers use the same credential discovery as the router, or accept
+an explicit key/value/callback. A callback is invoked once per request, never
+while constructing the client. Cloud credential exchanges use the configured
+transport and clock. For example, a provider directly with a key:
 
 ```java
 ProviderLM lm = OpenAILM.create(System.getenv("OPENAI_API_KEY"));
@@ -163,7 +169,13 @@ is not affected unless the entry says so.
   sends the string verbatim. The router strips it on every port.
 - **Stored logins yield a `BearerToken`** (AUTH-2) where the reference
   coerces the stored string to an `ApiKey`; every subscription door lists
-  `bearer`, so the wire is identical.
+  `bearer`, so the wire is identical. The injected provider transport/clock
+  governs cloud exchanges, not the borrowed stores' dedicated OAuth refresh
+  implementation.
+- **History content follows MAP-10 rather than inherited omissions.**
+  Responses preserves assistant images/files; unsupported combinations raise
+  before sending. Citations retain their title, URL and quote. The documented
+  differences from Python are tested, not ignored (see `docs/history-content.md`).
 - **`stream` returns `ProviderLM.EventStream`** (an `Iterator` that is
   `AutoCloseable`) rather than a language-level lazy sequence; closing it
   releases the connection. `ResponseStream` wraps it.
