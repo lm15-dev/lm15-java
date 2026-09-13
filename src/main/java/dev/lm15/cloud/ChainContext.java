@@ -121,9 +121,9 @@ public final class ChainContext {
     /** The file's text, from the file map when one is given, else the filesystem; null when unreadable. */
     public String read(String text) {
         if (files != null) {
-            String wanted = path(text).toString();
+            Path wanted = mappedPath(text);
             for (Map.Entry<String, String> f : files.entrySet()) {
-                if (path(f.getKey()).toString().equals(wanted)) return f.getValue();
+                if (mappedPath(f.getKey()).equals(wanted)) return f.getValue();
             }
             return null;
         }
@@ -132,6 +132,25 @@ public final class ChainContext {
         } catch (IOException | RuntimeException e) {
             return null;
         }
+    }
+
+    /** Match a virtual file through existing directory aliases, including macOS
+     * /var versus /private/var. The file itself need not exist on disk. */
+    private Path mappedPath(String text) {
+        Path absolute = path(text).toAbsolutePath();
+        Path ancestor = absolute;
+        var suffix = new java.util.ArrayDeque<String>();
+        while (ancestor != null) {
+            try {
+                Path real = ancestor.toRealPath();
+                for (String part : suffix) real = real.resolve(part);
+                return real.normalize();
+            } catch (IOException | SecurityException unavailable) {
+                if (ancestor.getFileName() != null) suffix.addFirst(ancestor.getFileName().toString());
+                ancestor = ancestor.getParent();
+            }
+        }
+        return absolute.normalize();
     }
 
     public boolean exists(String text) { return read(text) != null; }

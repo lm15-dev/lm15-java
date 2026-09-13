@@ -5,7 +5,7 @@ Python reference: `3bbbd3ee1bab40a1a61cc74db120c4a8eb7eb22b`.
 
 ## Results
 
-- **163 Java tests**, no failures/errors/skips, locally on OpenJDK 21.0.12.
+- **165 Java tests**, no failures/errors/skips, locally on OpenJDK 21.0.12.
 - **1,380 shared contract checks**, zero failures and the same two existing
   `openai.computer_use` request/response skips.
 - **368 independent comparisons:** 348 match Python; 20 documented MAP-10
@@ -35,6 +35,9 @@ never modifies the contract repository.
   callback result fails without falling back or sending. Known static credential
   kinds are still validated during construction. Reusing a builder cannot retain
   another environment's resolved credentials.
+- Mapped credential files and CLI paths match through directory aliases (such
+  as macOS `/var` and `/private/var`), even when only the parent exists on disk.
+  Regression tests reproduce this on Linux too; no platform skip is added.
 - Stored-login discovery respects the supplied home/path. Codex completion
   assembles its streaming response instead of treating SSE bytes as plain JSON.
 - Raw parse failures and response assembly close their sources once; early

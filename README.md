@@ -31,7 +31,7 @@ the same skip the reference reports.
 | `live` | the websocket codec (OpenAI Realtime, Gemini Live) | 24 / 0 |
 | `ingest` | MAP-12: a Chat Completions request body → `Request` under one preset's spellings; the response door | 160 / 0 |
 
-Beyond the harness: **163 unit and integration tests** (`mvn test`) and
+Beyond the harness: **165 unit and integration tests** (`mvn test`) and
 368 independent request comparisons (23 probes × 8 providers × complete /
 stream). Of these, 348 match Python; 20 verify documented corrections to its
 lost citations and unsupported media. Nothing is skipped: the corrected
