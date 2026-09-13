@@ -1,0 +1,35 @@
+From 5695e06d550e20f21dc5e626debafd4d5672d5b3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 12 Sep 2026 21:33:18 +0000
+Subject: [PATCH] harness/shims.json: register the Java shim (lm15-java, java
+ -jar target/lm15.jar)
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01GBE5trourX6iQpmPozJcxu
+---
+ harness/shims.json | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/harness/shims.json b/harness/shims.json
+index c77e4b3..378764c 100644
+--- a/harness/shims.json
++++ b/harness/shims.json
+@@ -38,5 +38,13 @@
+       "dist/vet.js"
+     ],
+     "cwd": "../lm15-ts"
++  },
++  "java": {
++    "command": [
++      "java",
++      "-jar",
++      "target/lm15.jar"
++    ],
++    "cwd": "../lm15-java"
+   }
+-}
+\ No newline at end of file
++}
+-- 
+2.43.0
+

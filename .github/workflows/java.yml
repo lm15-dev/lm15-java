@@ -1,0 +1,47 @@
+name: java
+
+on:
+  push:
+  pull_request:
+
+# The test pipeline only reads the checkout; never grant it more.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check out pinned contract
+        # Cross-repo gate: the lm15-contract vet harness grades this checkout
+        # at the SHA pinned in CONTRACT_PIN (playbooks/port.md rule 1). The
+        # contract's shim registry expects the port at the sibling path
+        # ../lm15-java.
+        run: |
+          PIN=$(tr -d '[:space:]' < CONTRACT_PIN)
+          [[ "$PIN" =~ ^[0-9a-f]{40}$ ]] || { echo 'Invalid CONTRACT_PIN'; exit 1; }
+          git clone --no-checkout https://github.com/lm15-dev/lm15-contract.git ../lm15-contract
+          git -C ../lm15-contract checkout --detach "$PIN"
+          if [ ! -e ../lm15-java ]; then
+            ln -s "$GITHUB_WORKSPACE" ../lm15-java
+          fi
+      - name: Build and unit tests
+        run: mvn -B -q package
+      - name: Contract harness (pinned)
+        run: |
+          test -z "$(git -C ../lm15-contract status --porcelain --untracked-files=all)"
+          python3 ../lm15-contract/harness/check.py --shim java --direction all
+      - name: Contract checkout stays clean
+        if: always()
+        run: |
+          test -d ../lm15-contract/.git
+          test -z "$(git -C ../lm15-contract status --porcelain --untracked-files=all)"
