@@ -25,7 +25,7 @@ public final class Access {
     public static final String OPENAI_CODEX_LOGIN_HINT = "Log in again: run `codex login` (ChatGPT subscription auth)";
     public static final String XAI_LOGIN_HINT = "Log in again: run Login.xai() (SuperGrok / X Premium subscription auth)";
 
-    public static final String DEFAULT_CLAUDE_CODE_VERSION = "2.1.170";
+    public static final String DEFAULT_CLAUDE_CODE_VERSION = "2.1.285";
     public static final String DEFAULT_CLAUDE_CODE_SYSTEM_PROMPT = "You are Claude Code, Anthropic's official CLI for Claude.";
     public static final String DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api/codex";
     public static final String DEFAULT_CODEX_ORIGINATOR = "lm15";
