@@ -155,8 +155,27 @@ def comparable(reply):
     return {"ok": False, "error": {"type": error.get("type"), "code": error.get("code")}}
 
 
+OLD_CLAUDE_CODE_UA = "claude-cli/2.1.170"
+NEW_CLAUDE_CODE_UA = "claude-cli/2.1.285"
+
+
 def documented_expected(provider, name, reference):
-    """Narrow, exact expectations for known reference defects, never an ignore list."""
+    """Narrow, exact expectations for known reference differences, never an ignore list."""
+    expected, rule = _documented_content(provider, name, reference)
+    if provider == "claude-code" and expected.get("ok"):
+        # lm15-contract changes/2026-09-30-claude-code-client-version.md: the pinned
+        # reference claims a Claude Code release the server now refuses; this port
+        # claims the release the contract receipted. Exactly this header, exactly
+        # these two values; every other byte must still equal the reference.
+        headers = expected["result"]["headers"]
+        assert headers.get("user-agent") == OLD_CLAUDE_CODE_UA, "reference user-agent changed: re-review the correction"
+        headers["user-agent"] = NEW_CLAUDE_CODE_UA
+        ua_rule = "AUTH-10 (2026-09-30): claim Claude Code 2.1.285"
+        rule = f"{rule}; {ua_rule}" if rule else ua_rule
+    return expected, rule
+
+
+def _documented_content(provider, name, reference):
     expected = copy.deepcopy(reference)
     citation = "Ex — https://example.com"
     if name == "citation_on_replay":
@@ -220,6 +239,7 @@ def main(argv=None) -> int:
     findings = []
     reference_differences = []
     verified_corrections = []
+    claude_code_built = set()  # claude-code cases the reference built: each must carry the user-agent rule
     total = 0
     try:
         for provider, spec in PROVIDERS.items():
@@ -233,6 +253,8 @@ def main(argv=None) -> int:
                     b = port.call("build_request", **fields)
                     case_id = f"{provider}.{name}{'.stream' if stream else ''}"
                     original, actual = comparable(a), comparable(b)
+                    if provider == "claude-code" and original.get("ok"):
+                        claude_code_built.add(case_id)
                     reference_diff = check.first_difference(original, actual)
                     if reference_diff is not None:
                         reference_differences.append({"case": case_id, "diff": reference_diff.to_dict()})
@@ -248,6 +270,7 @@ def main(argv=None) -> int:
     if args.verify_documented_fixes:
         required = {f"{p}.{n}{suffix}" for p in PROVIDERS for n in PROBES for suffix in ("", ".stream")
                     if n == "citation_on_replay" or (n == "media_url_and_file_id" and p in ("anthropic", "claude-code"))}
+        required |= claude_code_built
         missing = required - {item["case"] for item in verified_corrections}
         for case_id in sorted(missing):
             findings.append({"case": case_id, "note": "documented correction was not verified"})

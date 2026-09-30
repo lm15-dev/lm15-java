@@ -60,3 +60,14 @@ applied. For unsupported media, the exact refusal class and code are required.
 The mode fails missing corrections, wrong expected bytes or any other difference.
 It requires the pinned, clean Python revision and is the mode CI uses. No probe,
 assertion, contract fixture or skip was removed to make the checks pass.
+
+**2026-09-30: the Claude Code release.** This port now claims Claude Code 2.1.285
+(`user-agent: claude-cli/2.1.285`), because Anthropic refuses newer models on the
+2.1.170 the pinned reference still sends (lm15-contract
+`changes/2026-09-30-claude-code-client-version.md`, live receipts
+`receipts/2026-09-30-claude-code/`). The same mode checks it on every Claude Code
+comparison where the reference builds a request (a request both refuse has no
+header): the reference must send exactly `claude-cli/2.1.170`, this port exactly
+`claude-cli/2.1.285`, and every other byte must match. The `client_version`
+setting and the other changes of that contract entry arrive with this port's
+catch-up to the current contract.
